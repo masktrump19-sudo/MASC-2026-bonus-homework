@@ -16,13 +16,13 @@ global_goal:
 # map_size_y          : 30.0
 # map_size_z          : 3.0
 optimization:
-  formation_type      : 1
+  formation_type      : 2          # 2 = FORMATION_S (start the sequence at letter S)
   weight_obstacle     : 50000.0
   weight_swarm        : 50000.0
   weight_feasibility  : 10000.0
   weight_sqrvariance  : 10000.0
   weight_time         : 80.0
-  weight_formation    : 15000.0
+  weight_formation    : 18000.0    # raised from 15000 for crisper letter holding (< weight_swarm)
   obstacle_clearance  : 0.5
   swarm_clearance     : 0.5
 

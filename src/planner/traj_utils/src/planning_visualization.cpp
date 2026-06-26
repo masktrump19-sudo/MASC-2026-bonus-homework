@@ -150,9 +150,9 @@ namespace ego_planner
   }
 
   void PlanningVisualization::drone_6_odomeCallback(const nav_msgs::OdometryConstPtr &msg){
-    if (formation_size_ <=5 )
+    if (formation_size_ <=6 )
       return;
-    
+
     swarm_odom[6] << msg->pose.pose.position.x, msg->pose.pose.position.y, msg->pose.pose.position.z;
   }
 
@@ -209,10 +209,44 @@ namespace ego_planner
       line_end_.resize(line_size_);
       line_begin_ = {0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6};
       line_end_   = {1, 2, 3, 4, 5, 6, 2, 3, 4, 5, 6, 1};
-      
+
       break;
     }
-    
+
+    case FORMATION_TYPE::FORMATION_S:
+    case FORMATION_TYPE::FORMATION_Y:
+    case FORMATION_TYPE::FORMATION_U:
+    {
+      formation_size_ = 7;
+      setFormationLines(formation_type_);
+      break;
+    }
+
+    default:
+      break;
+    }
+  }
+
+  // Connection lines that trace each letter along its stroke order (drone_id indices).
+  void PlanningVisualization::setFormationLines(int formation_type)
+  {
+    line_size_ = 6;
+    line_begin_.resize(line_size_);
+    line_end_.resize(line_size_);
+    switch (formation_type)
+    {
+    case FORMATION_TYPE::FORMATION_S: // stroke: 0-1-5-6-2-3-4
+      line_begin_ = {0, 1, 5, 6, 2, 3};
+      line_end_   = {1, 5, 6, 2, 3, 4};
+      break;
+    case FORMATION_TYPE::FORMATION_Y: // two arms (0-2-6, 1-5-6) + stem (6-3-4)
+      line_begin_ = {0, 2, 1, 5, 6, 3};
+      line_end_   = {2, 6, 5, 6, 3, 4};
+      break;
+    case FORMATION_TYPE::FORMATION_U: // stroke: 0-6-2-3-4-5-1
+      line_begin_ = {0, 6, 2, 3, 4, 5};
+      line_end_   = {6, 2, 3, 4, 5, 1};
+      break;
     default:
       break;
     }

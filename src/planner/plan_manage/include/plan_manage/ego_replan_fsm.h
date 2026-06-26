@@ -9,6 +9,7 @@
 #include <ros/ros.h>
 #include <std_msgs/Empty.h>
 #include <std_msgs/Bool.h>
+#include <std_msgs/Float64.h>
 #include <vector>
 #include <visualization_msgs/Marker.h>
 
@@ -74,6 +75,24 @@ namespace ego_planner
     double swarm_relative_pts_[50][3];
     double swarm_scale_;
 
+    /* ===== letter-formation time-driven switching (S -> Y -> S -> U) ===== */
+    enum LetterPhase { LP_WARMUP = -1, LP_S = 0, LP_Y = 1, LP_S2 = 2, LP_U = 3, LP_DONE = 4 };
+    ros::Timer      formation_timer_;       // 20Hz, decides when to switch
+    ros::Publisher  demo_t0_pub_;           // drone 0 broadcasts the shared start time (latched)
+    ros::Subscriber demo_t0_sub_;           // other drones receive it
+    double demo_T0_{-1.0};                   // shared absolute wall-clock origin (s); <0 = not set
+    bool   t0_locked_{false};                // demo_T0_ holds an agreed value
+    bool   t0_published_{false};             // this drone has broadcast its own candidate
+    bool   formation_seq_active_{false};     // becomes true once a goal is received
+    bool   formation_done_{false};
+    int    formation_phase_{-1};             // current applied phase (-1 = warmup)
+    double formation_warmup_{5.0};           // s, takeoff + let all 7 drones reach EXEC_TRAJ
+    double formation_hold_{5.0};             // s per letter (>= 3s requirement, with margin)
+    int    formation_type_seq_[4] = {        // phase -> FORMATION_TYPE
+        PolyTrajOptimizer::FORMATION_S, PolyTrajOptimizer::FORMATION_Y,
+        PolyTrajOptimizer::FORMATION_S, PolyTrajOptimizer::FORMATION_U};
+    double letter_rel_[4][7][3];             // phase -> scaled relative_pos (k * design coords)
+
     /* planning data */
     bool have_trigger_, have_target_, have_odom_, have_new_target_, have_recv_pre_agent_, have_local_traj_;
     FSM_EXEC_STATE exec_state_;
@@ -127,6 +146,9 @@ namespace ego_planner
     void RecvBroadcastPolyTrajCallback(const traj_utils::PolyTrajConstPtr &msg);
     void polyTraj2ROSMsg(traj_utils::PolyTraj &msg);
     void formationWaypointCallback(const geometry_msgs::PoseStampedPtr &msg);
+    void formationTimerCallback(const ros::TimerEvent &e);
+    void demoT0Callback(const std_msgs::Float64ConstPtr &msg);
+    void applyLetterPhase(int phase);
     bool frontEndPathSearching();
     bool checkCollision();
 

@@ -42,8 +42,11 @@ namespace ego_planner
 
     enum FORMATION_TYPE
     {
-      NONE_FORMATION        = 0,
-      REGULAR_HEXAGON       = 1
+      NONE_FORMATION  = 0,
+      REGULAR_HEXAGON = 1,
+      FORMATION_S     = 2,
+      FORMATION_Y     = 3,
+      FORMATION_U     = 4
     };
 
     int drone_id_;
@@ -93,6 +96,9 @@ namespace ego_planner
     typedef std::shared_ptr<PlanningVisualization> Ptr;
 
     void initSwarmGraphVisual();
+    // Set the RViz connection lines to trace the strokes of the given letter
+    // (FORMATION_S / FORMATION_Y / FORMATION_U). Called at runtime when the swarm switches letters.
+    void setFormationLines(int formation_type);
 
     void displayMarkerList(ros::Publisher &pub, const vector<Eigen::Vector3d> &list, double scale,
                            Eigen::Vector4d color, int id,  bool show_sphere = true);

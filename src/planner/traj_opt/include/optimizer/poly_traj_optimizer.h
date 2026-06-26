@@ -62,11 +62,8 @@ namespace ego_planner
       STOP_FOR_ERROR
     } force_stop_type_;
 
-    enum FORMATION_TYPE
-    {
-      NONE_FORMATION        = 0,
-      REGULAR_HEXAGON       = 1
-    };
+    // NOTE: FORMATION_TYPE moved to the public section below so the FSM can
+    //       reference FORMATION_S / FORMATION_Y / FORMATION_U for runtime switching.
 
     /* optimization parameters */
     double wei_obs_;                         // obstacle weight
@@ -89,6 +86,15 @@ namespace ego_planner
 
   public:
 
+    enum FORMATION_TYPE
+    {
+      NONE_FORMATION  = 0,
+      REGULAR_HEXAGON = 1,
+      FORMATION_S     = 2,
+      FORMATION_Y     = 3,
+      FORMATION_U     = 4
+    };
+
     PolyTrajOptimizer() {}
     ~PolyTrajOptimizer() {}
 
@@ -98,6 +104,15 @@ namespace ego_planner
     void setControlPoints(const Eigen::MatrixXd &points);
     void setSwarmTrajs(SwarmTrajData *swarm_trajs_ptr);
     void setDroneId(const int drone_id);
+
+    // Runtime formation switching (called from the FSM). formation_size_ stays 7,
+    // so there is no resize; only invoked inside the single-threaded callback chain.
+    inline void switchFormation(int type)
+    {
+      if (type == FORMATION_TYPE::NONE_FORMATION) return; // guard: never disable formation
+      setDesiredFormation(type);
+    }
+    inline int getFormationSize() const { return formation_size_; }
 
     /* helper functions */
     inline ConstrainPoints getControlPoints() { return cps_; }
@@ -220,6 +235,51 @@ namespace ego_planner
 
           formation_size_ = swarm_des.size();
           // construct the desired swarm graph
+          swarm_graph_->setDesiredForm(swarm_des);
+          break;
+        }
+
+        case FORMATION_TYPE::FORMATION_S :
+        {
+          // letter "S" — 7 vertices, vertex i belongs to drone i, z = 0 (planar)
+          swarm_des.push_back(Eigen::Vector3d( 2,  4, 0));  // drone 0  top-right
+          swarm_des.push_back(Eigen::Vector3d(-2,  4, 0));  // drone 1  top-left
+          swarm_des.push_back(Eigen::Vector3d( 2, -2, 0));  // drone 2  lower-right belly
+          swarm_des.push_back(Eigen::Vector3d( 2, -4, 0));  // drone 3  bottom-right
+          swarm_des.push_back(Eigen::Vector3d(-2, -4, 0));  // drone 4  bottom-left
+          swarm_des.push_back(Eigen::Vector3d(-2,  2, 0));  // drone 5  upper-left belly
+          swarm_des.push_back(Eigen::Vector3d( 0,  0, 0));  // drone 6  center hub
+          formation_size_ = swarm_des.size();
+          swarm_graph_->setDesiredForm(swarm_des);
+          break;
+        }
+
+        case FORMATION_TYPE::FORMATION_Y :
+        {
+          // letter "Y" — 7 vertices
+          swarm_des.push_back(Eigen::Vector3d( 2,   4,   0)); // drone 0  right arm tip
+          swarm_des.push_back(Eigen::Vector3d(-2,   4,   0)); // drone 1  left arm tip
+          swarm_des.push_back(Eigen::Vector3d( 1.4, 2,   0)); // drone 2  right arm mid
+          swarm_des.push_back(Eigen::Vector3d( 0,  -2,   0)); // drone 3  stem upper
+          swarm_des.push_back(Eigen::Vector3d( 0,  -4,   0)); // drone 4  stem bottom
+          swarm_des.push_back(Eigen::Vector3d(-1.4, 2,   0)); // drone 5  left arm mid
+          swarm_des.push_back(Eigen::Vector3d( 0,   0.4, 0)); // drone 6  junction
+          formation_size_ = swarm_des.size();
+          swarm_graph_->setDesiredForm(swarm_des);
+          break;
+        }
+
+        case FORMATION_TYPE::FORMATION_U :
+        {
+          // letter "U" — 7 vertices
+          swarm_des.push_back(Eigen::Vector3d( 2.4,  4,   0)); // drone 0  top-right
+          swarm_des.push_back(Eigen::Vector3d(-2.4,  4,   0)); // drone 1  top-left
+          swarm_des.push_back(Eigen::Vector3d( 1.6, -3,   0)); // drone 2  right bottom curve
+          swarm_des.push_back(Eigen::Vector3d( 0,   -4,   0)); // drone 3  bottom center
+          swarm_des.push_back(Eigen::Vector3d(-1.6, -3,   0)); // drone 4  left bottom curve
+          swarm_des.push_back(Eigen::Vector3d(-2.4,  0.2, 0)); // drone 5  left side mid
+          swarm_des.push_back(Eigen::Vector3d( 2.4,  0.2, 0)); // drone 6  right side mid
+          formation_size_ = swarm_des.size();
           swarm_graph_->setDesiredForm(swarm_des);
           break;
         }

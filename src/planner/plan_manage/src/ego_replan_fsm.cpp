@@ -116,8 +116,32 @@ namespace ego_planner
     else if (target_type_ == TARGET_TYPE::SWARM_MANUAL_TARGET)
     {
       central_goal = nh.subscribe("/move_base_simple/goal", 1, &EGOReplanFSM::formationWaypointCallback, this);
+
+      // ===== letter-formation sequence: switching timer + shared T0 + relative_pos table =====
+      formation_timer_ = nh.createTimer(ros::Duration(0.05), &EGOReplanFSM::formationTimerCallback, this);
+      demo_t0_pub_ = nh.advertise<std_msgs::Float64>("/swarm/demo_T0", 1, /*latch=*/true);
+      demo_t0_sub_ = nh.subscribe("/swarm/demo_T0", 1, &EGOReplanFSM::demoT0Callback, this);
+      planner_manager_->ploy_traj_opt_->switchFormation(PolyTrajOptimizer::FORMATION_S); // preset first letter = S
+      {
+        // relative_pos = k * design coordinates (k scales the physical letter size; cost is scale-invariant)
+        const double k = 0.45;
+        const double S[7][3] = {{2,4,0},{-2,4,0},{2,-2,0},{2,-4,0},{-2,-4,0},{-2,2,0},{0,0,0}};
+        const double Y[7][3] = {{2,4,0},{-2,4,0},{1.4,2,0},{0,-2,0},{0,-4,0},{-1.4,2,0},{0,0.4,0}};
+        const double U[7][3] = {{2.4,4,0},{-2.4,4,0},{1.6,-3,0},{0,-4,0},{-1.6,-3,0},{-2.4,0.2,0},{2.4,0.2,0}};
+        for (int i = 0; i < 7; i++)
+          for (int j = 0; j < 3; j++)
+          {
+            letter_rel_[0][i][j] = k * S[i][j];  // phase 0: S
+            letter_rel_[1][i][j] = k * Y[i][j];  // phase 1: Y
+            letter_rel_[2][i][j] = k * S[i][j];  // phase 2: S
+            letter_rel_[3][i][j] = k * U[i][j];  // phase 3: U
+          }
+      }
     }
-    cout << "Wrong target_type_ value! target_type_=" << target_type_ << endl;
+    else
+    {
+      cout << "Wrong target_type_ value! target_type_=" << target_type_ << endl;
+    }
   }
 
   void EGOReplanFSM::execFSMCallback(const ros::TimerEvent &e)
@@ -215,6 +239,19 @@ namespace ego_planner
 
     case EXEC_TRAJ:
     {
+      // Each drone broadcasts its own start-time candidate the first time it reaches EXEC_TRAJ.
+      // All drones then converge to the EARLIEST candidate (see demoT0Callback), so the sequence
+      // stays synchronized AND is robust if drone 0 never takes off (no single point of failure).
+      if (formation_seq_active_ && !t0_published_)
+      {
+        double cand = ros::Time::now().toSec() + 0.3; // +300ms so the latched msg propagates
+        t0_published_ = true;
+        std_msgs::Float64 m;
+        m.data = cand;
+        demo_t0_pub_.publish(m);
+        if (!t0_locked_ || cand < demo_T0_) { demo_T0_ = cand; t0_locked_ = true; } // seed locally
+      }
+
       /* determine if need to replan */
       LocalTrajData *info = &planner_manager_->traj_.local_traj;
       double t_cur = ros::Time::now().toSec() - info->start_time;
@@ -224,7 +261,9 @@ namespace ego_planner
 
       if ((local_target_pt_ - end_pt_).norm() < 0.1) // local target close to the global target
       {
-        if (t_cur > info->duration - 0.2)
+        // While the letter sequence is still running, never declare "arrived" (which would
+        // stop replanning and hover). Only allow arrival once the sequence is done.
+        if (t_cur > info->duration - 0.2 && (!formation_seq_active_ || formation_done_))
         {
           have_target_ = false;
           have_local_traj_ = false;
@@ -643,6 +682,12 @@ namespace ego_planner
 
     int id = planner_manager_->pp_.drone_id;
 
+    // The sequence starts on letter S: adopt the S goal distribution immediately so that
+    // during warmup the goal anchor matches the (already preset) S shape cost.
+    for (int k = 0; k < 7; k++)
+      for (int j = 0; j < 3; j++)
+        swarm_relative_pts_[k][j] = letter_rel_[0][k][j];
+
     Eigen::Vector3d relative_pos;
     relative_pos << swarm_relative_pts_[id][0],
                     swarm_relative_pts_[id][1],
@@ -674,6 +719,12 @@ namespace ego_planner
       have_target_ = true;
       have_new_target_ = true;
 
+      // enable the letter-formation sequence (S -> Y -> S -> U); T0 is locked
+      // by drone 0 when it first enters EXEC_TRAJ (see execFSMCallback).
+      formation_seq_active_ = true;
+      formation_phase_ = LP_WARMUP;
+      formation_done_ = false;
+
       /*** FSM ***/
       if (exec_state_ == WAIT_TARGET)
         changeFSMExecState(SEQUENTIAL_START, "TRIG");
@@ -686,6 +737,93 @@ namespace ego_planner
     else
     {
       ROS_ERROR("Unable to generate global trajectory!");
+    }
+  }
+
+  // Receive a start-time candidate from any drone (latched topic) and keep the EARLIEST one,
+  // so all 7 drones converge to the same T0 (the first drone to take off wins).
+  void EGOReplanFSM::demoT0Callback(const std_msgs::Float64ConstPtr &msg)
+  {
+    if (!t0_locked_ || msg->data < demo_T0_)
+    {
+      demo_T0_ = msg->data;
+      t0_locked_ = true;
+    }
+  }
+
+  // 20Hz: decide, from the shared wall clock, which letter the swarm should currently form.
+  void EGOReplanFSM::formationTimerCallback(const ros::TimerEvent &e)
+  {
+    if (!formation_seq_active_ || !t0_locked_ || formation_done_)
+      return;
+    if (exec_state_ != EXEC_TRAJ && exec_state_ != REPLAN_TRAJ) // only while flying
+      return;
+
+    double elapsed = ros::Time::now().toSec() - demo_T0_;
+    int target;
+    if (elapsed < formation_warmup_)
+      target = LP_WARMUP;
+    else
+      target = std::min(4, (int)((elapsed - formation_warmup_) / formation_hold_));
+
+    if (target == formation_phase_) // already in this phase
+      return;
+    formation_phase_ = target;
+
+    if (target == LP_DONE)
+    {
+      formation_done_ = true;
+      ROS_INFO("\033[42;30m[drone %d] formation sequence DONE, holding U to goal.\033[0m",
+               planner_manager_->pp_.drone_id);
+      return;
+    }
+    if (target >= LP_S && target <= LP_U)
+      applyLetterPhase(target);
+  }
+
+  // Apply one letter phase: switch the desired graph shape AND the per-drone goal
+  // distribution, then replan the global trajectory so the new orientation anchor
+  // actually takes effect. Runs in the (single-threaded) callback chain, so there is
+  // no concurrency with the optimizer.
+  void EGOReplanFSM::applyLetterPhase(int phase)
+  {
+    int me = planner_manager_->pp_.drone_id;
+
+    // (a) switch the desired formation shape -> recomputes L_des immediately
+    planner_manager_->ploy_traj_opt_->switchFormation(formation_type_seq_[phase]);
+    // (a2) switch the RViz connection lines so the letter is readable (only drone 0 publishes)
+    visualization_->setFormationLines(formation_type_seq_[phase]);
+
+    // (b) switch relative_pos -> end_pt (swarm_central keeps the user's far click target)
+    for (int k = 0; k < 7; k++)
+      for (int j = 0; j < 3; j++)
+        swarm_relative_pts_[k][j] = letter_rel_[phase][k][j];
+    Eigen::Vector3d rp(swarm_relative_pts_[me][0], swarm_relative_pts_[me][1], swarm_relative_pts_[me][2]);
+    end_pt_ = swarm_central_pos_ + swarm_scale_ * rp;
+
+    // (c) replan the global trajectory to the new end_pt (critical: this is what anchors
+    //     the letter orientation; only updating relative_pos would not redirect motion)
+    std::vector<Eigen::Vector3d> wps;
+    wps.push_back(end_pt_);
+    bool ok = planner_manager_->planGlobalTrajWaypoints(
+        odom_pos_, odom_vel_, Eigen::Vector3d::Zero(), wps,
+        Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
+
+    // (d) sanity check + trigger REPLAN so the next lbfgs iteration uses the new L_des
+    if (planner_manager_->ploy_traj_opt_->getFormationSize() != 7)
+      ROS_ERROR("[drone %d] formation_size != 7 after switching to phase %d!", me, phase);
+
+    if (ok)
+    {
+      end_vel_.setZero();
+      have_target_ = true;
+      have_new_target_ = true;
+      if (exec_state_ == EXEC_TRAJ)
+        changeFSMExecState(REPLAN_TRAJ, "FORM");
+    }
+    else
+    {
+      ROS_ERROR("[drone %d] applyLetterPhase: global trajectory plan failed!", me);
     }
   }
   void EGOReplanFSM::planGlobalTrajbyGivenWps()
